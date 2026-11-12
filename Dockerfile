@@ -73,6 +73,7 @@ RUN set -ex \
         libmariadb3 \
         libpq5 \
         curl \
+        tini \
     && addgroup --gid 1000 appgroup \
     && adduser --shell /bin/sh --disabled-password --uid 1000 --gid 1000 appuser \
     && if [ "$SO_TAG" = "latest" ]; then \
@@ -133,4 +134,5 @@ LABEL org.opencontainers.image.title="Misaka Danmu Server" \
       org.opencontainers.image.licenses="MIT"
 
 # 运行应用的默认命令
-CMD ["/exec.sh"]
+# pid 1 用 tini：回收 healthcheck / docker exec 留下的子进程，避免僵尸堆积
+ENTRYPOINT ["/usr/bin/tini", "--", "/exec.sh"]
