@@ -1,3 +1,7 @@
+> **这是 fork，不是上游。** 上游：[l429609201/misaka_danmu_server](https://github.com/l429609201/misaka_danmu_server)
+> 本 fork 只做本机部署需要的修补，改动清单见文末「本 fork 的改动」。
+> 跟上游：`git fetch upstream && git rebase upstream/main local`（`main` 只快进，改动全在 `local` 分支）
+
 <div align="center">
 <img src="web/public/images/logo.png" alt="御坂网络弹幕服务" width="128" style="border-radius: 16px;" />
 <h1 align="center" style="margin-top: 0">御坂网络弹幕服务</h1>
@@ -132,3 +136,54 @@
 ### Star History
 
 [![Star History Chart](https://star-history.dera.page/svg?repos=l429609201/misaka_danmu_server&type=Date)](https://star-history.dera.page/#l429609201/misaka_danmu_server&Date)
+
+
+---
+
+## 本 fork 的改动
+
+### 1. 用 tini 当 pid 1，修容器内僵尸进程堆积
+
+**症状**：容器跑十几小时后，`ps` 里积累几百个 `python <defunct>`；宿主 `ps` 里这批僵尸挂在本容器的父进程名下，重启容器才清空。本项目约每 30 秒 1 个，一天 2800+。
+
+**根因**：Docker 的 healthcheck 以 `CMD-SHELL` 形式每 30 秒执行一次
+
+```sh
+python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7768/api/health')"
+```
+
+`docker exec` / healthcheck 起的进程，父进程是容器的 **pid 1**。本项目的 pid 1 由 `exec.sh` → `run.sh` 一路 `exec` 成 `python -m src.main`（见 `docker top`）。CPython 不会为「不是自己 spawn 的子进程」收尸，于是每次健康检查退出后都留一个僵尸。`docker exec` 进去跑的东西同理。
+
+**修法**（本 fork 唯一改动，`Dockerfile` 两处）：
+
+```dockerfile
+# 运行时依赖里加 tini
+    && apt-get install -y --no-install-recommends \
+        tzdata \
+        libmariadb3 \
+        libpq5 \
+        curl \
+        tini \
+
+# 末尾：把 CMD 换成 ENTRYPOINT，让 tini 接管 pid 1
+# pid 1 用 tini：回收 healthcheck / docker exec 留下的子进程，避免僵尸堆积
+ENTRYPOINT ["/usr/bin/tini", "--", "/exec.sh"]
+```
+
+tini 接管 pid 1 后，所有被 reparent 到它的子进程都会被 `wait` 掉。业务的 `exec.sh`、`su-exec`、`python` 链路完全不变。
+
+**验证**：
+
+```sh
+docker build -t misaka-danmu:local .
+# 重建容器后观察 20 个 healthcheck 周期（10 分钟）
+ps -eo stat= | grep -c '^Z'     # 应为 0
+```
+
+**为什么不用 compose 的 `init: true`**：那样只对 compose 部署生效；本项目实际用 `docker run` 部署，写进 Dockerfile 才对所有方式一致生效，也不依赖调用方记得加参数。
+
+**副作用**：无。tini 只做信号转发和子进程回收，不改变业务行为。
+
+---
+
+*本 fork 不向上游提 PR，仅自用。上游若采纳同类修复，`local` 分支即可弃用。*
